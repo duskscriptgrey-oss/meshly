@@ -32,6 +32,12 @@ jobs:
           "$SDKMANAGER" --install "platforms;android-35"
           "$SDKMANAGER" --install "build-tools;35.0.0"
 
+      - name: Reuse the same debug signing key across builds
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: meshly-debug-keystore-v1
+
       - name: Install Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
