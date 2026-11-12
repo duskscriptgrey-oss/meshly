@@ -130,7 +130,7 @@ class LocalMeshTransport(
                                 ?.toString(Charsets.UTF_8)
                                 ?.takeIf { it.isNotBlank() }
                                 ?: info.serviceName.removePrefix("Meshly-")
-                            val peer = NearbyPeer(info.serviceName, name, host, port)
+                            val peer = NearbyPeer(info.serviceName.removePrefix("Meshly-"), name, host, port)
                             peers[peer.id] = peer
                             publishPeers()
                         }
@@ -140,7 +140,7 @@ class LocalMeshTransport(
                 }
             }
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
-                peers.remove(serviceInfo.serviceName)
+                peers.remove(serviceInfo.serviceName.removePrefix("Meshly-"))
                 publishPeers()
             }
             override fun onDiscoveryStopped(serviceType: String) = Unit
