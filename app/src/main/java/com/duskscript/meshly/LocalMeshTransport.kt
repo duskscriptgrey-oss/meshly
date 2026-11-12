@@ -166,7 +166,7 @@ class LocalMeshTransport(
                 val encodedName = Base64.encodeToString(displayName.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
                 val encodedText = Base64.encodeToString(text.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
                 socket.getOutputStream().bufferedWriter(Charsets.UTF_8).use { writer ->
-                    writer.write("$PROTOCOL_PREFIX\\t$encodedName\\t$encodedText\\t${System.currentTimeMillis()}")
+                    writer.write("$PROTOCOL_PREFIX\t$encodedName\t$encodedText\t${System.currentTimeMillis()}")
                     writer.newLine()
                     writer.flush()
                 }
@@ -178,7 +178,7 @@ class LocalMeshTransport(
         socket.use { connection ->
             try {
                 val line = connection.getInputStream().bufferedReader(Charsets.UTF_8).readLine() ?: return
-                val parts = line.split('\\t')
+                val parts = line.split('\t')
                 if (parts.size != 4 || parts[0] != PROTOCOL_PREFIX) return
                 val sender = String(Base64.decode(parts[1], Base64.DEFAULT), Charsets.UTF_8).take(60)
                 val message = String(Base64.decode(parts[2], Base64.DEFAULT), Charsets.UTF_8).take(4_000)
