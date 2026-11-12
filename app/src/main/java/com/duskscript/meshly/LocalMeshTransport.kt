@@ -56,6 +56,7 @@ class LocalMeshTransport(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val peers = ConcurrentHashMap<String, NearbyPeer>()
     private val udpLastSeen = ConcurrentHashMap<String, Long>()
+    private val nsdPeerIds = ConcurrentHashMap<String, Boolean>()
     private val serviceId = UUID.randomUUID().toString().take(8)
     private val serviceName = "Meshly-$serviceId"
     private var serverSocket: ServerSocket? = null
@@ -145,6 +146,7 @@ class LocalMeshTransport(
                                 ?.takeIf { it.isNotBlank() }
                                 ?: info.serviceName.removePrefix("Meshly-")
                             val peer = NearbyPeer(info.serviceName, name, host, port)
+                            nsdPeerIds[peer.id] = true
                             peers[peer.id] = peer
                             publishPeers()
                         }
@@ -154,6 +156,7 @@ class LocalMeshTransport(
                 }
             }
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+                nsdPeerIds.remove(serviceInfo.serviceName)
                 val lastUdpAnnouncement = udpLastSeen[serviceInfo.serviceName] ?: 0L
                 if (System.currentTimeMillis() - lastUdpAnnouncement > 10_000L) {
                     peers.remove(serviceInfo.serviceName)
@@ -223,6 +226,7 @@ class LocalMeshTransport(
                         postStatus("Nearby announcement retrying: ${error.localizedMessage ?: "network error"}")
                     }
                     delay(DISCOVERY_INTERVAL_MS)
+                    purgeStaleUdpPeers()
                 }
             }
         }
@@ -261,6 +265,20 @@ class LocalMeshTransport(
                 // One unavailable interface must not prevent announcements on another.
             }
         }
+    }
+
+    private fun purgeStaleUdpPeers() {
+        val cutoff = System.currentTimeMillis() - 12_000L
+        var changed = false
+        udpLastSeen.entries.forEach { entry ->
+            if (entry.value < cutoff && udpLastSeen.remove(entry.key, entry.value)) {
+                if (!nsdPeerIds.containsKey(entry.key)) {
+                    peers.remove(entry.key)
+                    changed = true
+                }
+            }
+        }
+        if (changed) publishPeers()
     }
 
     private fun handleDiscoveryPacket(packet: DatagramPacket) {
@@ -353,6 +371,7 @@ class LocalMeshTransport(
         try { multicastLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) { }
         peers.clear()
         udpLastSeen.clear()
+        nsdPeerIds.clear()
         publishPeers()
         scope.cancel()
     }
