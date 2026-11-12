@@ -13,11 +13,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -47,6 +49,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 
 private val Ink = Color(0xFF101820)
 private val Panel = Color(0xFF192631)
@@ -68,6 +72,7 @@ private val Muted = Color(0xFF9BAEB8)
 private val SoftMint = Color(0xFF203D3B)
 
 data class ChatMessage(
+    val peerId: String,
     val peerName: String,
     val text: String,
     val outgoing: Boolean,
@@ -108,19 +113,39 @@ private fun MeshlyApp() {
     var editingProfile by remember { mutableStateOf(false) }
     var openingSettings by remember { mutableStateOf(false) }
     var peers by remember { mutableStateOf(emptyList<NearbyPeer>()) }
-    var messages by remember { mutableStateOf(loadMessages(prefs)) }
+    val messagesState = remember { mutableStateOf(loadMessages(prefs)) }
+    val messages = messagesState.value
+    val localDeviceId = remember {
+        prefs.getString("device_id", null)?.takeIf { it.isNotBlank() }
+            ?: UUID.randomUUID().toString().also {
+                prefs.edit().putString("device_id", it).apply()
+            }
+    }
     var networkStatus by remember { mutableStateOf("Preparing local discovery…") }
     val coroutineScope = rememberCoroutineScope()
 
-    val transport = remember(savedName) {
+    fun appendMessage(message: ChatMessage) {
+        val updated = (messagesState.value + message).takeLast(500)
+        messagesState.value = updated
+        saveMessages(prefs, updated)
+    }
+
+    val transport = remember(savedName, localDeviceId) {
         if (savedName.isBlank()) null else LocalMeshTransport(
             context = context,
             displayName = savedName,
+            deviceId = localDeviceId,
             onPeersChanged = { peers = it },
             onMessage = { peer, message ->
-                val updated = messages + ChatMessage(peer.name, message, false, System.currentTimeMillis())
-                messages = updated
-                saveMessages(prefs, updated)
+                appendMessage(
+                    ChatMessage(
+                        peerId = peer.id,
+                        peerName = peer.name,
+                        text = message,
+                        outgoing = false,
+                        time = System.currentTimeMillis()
+                    )
+                )
             },
             onStatus = { networkStatus = it }
         )
@@ -145,18 +170,30 @@ private fun MeshlyApp() {
         } else if (selectedPeer != null) {
             ChatScreen(
                 peer = selectedPeer!!,
-                messages = messages.filter { it.peerName == selectedPeer!!.name },
+                messages = messages.filter { belongsToPeer(it, selectedPeer!!) },
                 onBack = { selectedPeer = null },
-                onSend = { text ->
+                onSend = { text, onSent ->
                     val peer = selectedPeer!!
                     coroutineScope.launch {
                         val result = transport?.send(peer, text)
                         if (result?.isSuccess == true) {
-                            val updated = messages + ChatMessage(peer.name, text, true, System.currentTimeMillis())
-                            messages = updated
-                            saveMessages(prefs, updated)
+                            appendMessage(
+                                ChatMessage(
+                                    peerId = peer.id,
+                                    peerName = peer.name,
+                                    text = text,
+                                    outgoing = true,
+                                    time = System.currentTimeMillis()
+                                )
+                            )
+                            onSent()
                         } else {
-                            networkStatus = "Message not sent. Check both phones are on the same Wi-Fi or hotspot."
+                            val detail = result?.exceptionOrNull()?.localizedMessage
+                            networkStatus = if (detail.isNullOrBlank()) {
+                                "Message not sent. Check both phones are on the same Wi-Fi or hotspot."
+                            } else {
+                                "Message not sent: $detail"
+                            }
                         }
                     }
                 }
@@ -296,14 +333,14 @@ private fun ChatsScreen(
         Spacer(Modifier.height(24.dp))
         Text("YOUR CHATS", color = Muted, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(10.dp))
-        val conversations = peers.filter { peer -> messages.any { it.peerName == peer.name } }
+        val conversations = peers.filter { peer -> messages.any { belongsToPeer(it, peer) } }
         if (conversations.isEmpty()) {
             Text("No conversations yet", style = MaterialTheme.typography.titleMedium)
             Text("When you connect with someone nearby, your conversations will appear here.", color = Muted)
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(conversations, key = { it.id }) { peer ->
-                    val latest = messages.lastOrNull { it.peerName == peer.name }
+                    val latest = messages.lastOrNull { belongsToPeer(it, peer) }
                     PeerCard(peer = peer, subtitle = latest?.text ?: "Start a conversation", onClick = { onOpen(peer) })
                 }
             }
@@ -462,10 +499,14 @@ private fun ChatScreen(
     peer: NearbyPeer,
     messages: List<ChatMessage>,
     onBack: () -> Unit,
-    onSend: (String) -> Unit
+    onSend: (String, () -> Unit) -> Unit
 ) {
     var message by remember { mutableStateOf("") }
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    }
+    Column(Modifier.fillMaxSize().imePadding().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") }
             Column {
@@ -479,7 +520,11 @@ private fun ChatScreen(
                 Text("Say hello to ${peer.name}. Your messages will appear here.", color = Muted)
             }
         } else {
-            LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 items(messages) { item ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (item.outgoing) Arrangement.End else Arrangement.Start) {
                         Surface(color = if (item.outgoing) SoftMint else Panel, shape = RoundedCornerShape(18.dp)) {
@@ -501,8 +546,7 @@ private fun ChatScreen(
                 onClick = {
                     val clean = message.trim()
                     if (clean.isNotEmpty()) {
-                        onSend(clean)
-                        message = ""
+                        onSend(clean) { message = "" }
                     }
                 },
                 enabled = message.isNotBlank()
@@ -516,8 +560,10 @@ private fun loadMessages(prefs: android.content.SharedPreferences): List<ChatMes
         val array = JSONArray(prefs.getString("chat_history", "[]") ?: "[]")
         (0 until array.length()).mapNotNull { index ->
             val item = array.optJSONObject(index) ?: return@mapNotNull null
+            val peerName = item.optString("peer")
             ChatMessage(
-                peerName = item.optString("peer"),
+                peerId = item.optString("peerId").ifBlank { peerName },
+                peerName = peerName,
                 text = item.optString("text"),
                 outgoing = item.optBoolean("outgoing"),
                 time = item.optLong("time")
@@ -528,10 +574,16 @@ private fun loadMessages(prefs: android.content.SharedPreferences): List<ChatMes
     }
 }
 
+private fun belongsToPeer(message: ChatMessage, peer: NearbyPeer): Boolean {
+    return message.peerId == peer.id ||
+        (message.peerId == message.peerName && message.peerName == peer.name)
+}
+
 private fun saveMessages(prefs: android.content.SharedPreferences, messages: List<ChatMessage>) {
     val array = JSONArray()
     messages.takeLast(500).forEach { message ->
         array.put(JSONObject().apply {
+            put("peerId", message.peerId)
             put("peer", message.peerName)
             put("text", message.text)
             put("outgoing", message.outgoing)
