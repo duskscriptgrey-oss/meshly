@@ -29,13 +29,14 @@ data class NearbyPeer(
 class LocalMeshTransport(
     context: Context,
     private val displayName: String,
+    private val deviceId: String,
     private val onPeersChanged: (List<NearbyPeer>) -> Unit,
     private val onMessage: (NearbyPeer, String) -> Unit,
     private val onStatus: (String) -> Unit
 ) {
     companion object {
         private const val SERVICE_TYPE = "_meshly._tcp."
-        private const val PROTOCOL_PREFIX = "MESHLY1"
+        private const val PROTOCOL_PREFIX = "MESHLY2"
     }
 
     private val appContext = context.applicationContext
@@ -44,8 +45,7 @@ class LocalMeshTransport(
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val peers = ConcurrentHashMap<String, NearbyPeer>()
-    private val serviceId = UUID.randomUUID().toString().take(8)
-    private val serviceName = "Meshly-$serviceId"
+    private val serviceName = "Meshly-$deviceId"
     private var serverSocket: ServerSocket? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     @Volatile private var started = false
@@ -161,33 +161,44 @@ class LocalMeshTransport(
     suspend fun send(peer: NearbyPeer, text: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(peer.host, peer.port), 5_000)
-                socket.soTimeout = 5_000
+                socket.connect(InetSocketAddress(peer.host, peer.port), 8_000)
+                socket.soTimeout = 8_000
                 val encodedName = Base64.encodeToString(displayName.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
                 val encodedText = Base64.encodeToString(text.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                socket.getOutputStream().bufferedWriter(Charsets.UTF_8).use { writer ->
-                    writer.write("$PROTOCOL_PREFIX\t$encodedName\t$encodedText\t${System.currentTimeMillis()}")
-                    writer.newLine()
-                    writer.flush()
+                val messageId = UUID.randomUUID().toString()
+                val writer = socket.getOutputStream().bufferedWriter(Charsets.UTF_8)
+                writer.write("$PROTOCOL_PREFIX\t$deviceId\t$encodedName\t$encodedText\t$messageId\t${System.currentTimeMillis()}")
+                writer.newLine()
+                writer.flush()
+                socket.shutdownOutput()
+                val acknowledgement = socket.getInputStream().bufferedReader(Charsets.UTF_8).readLine()
+                check(acknowledgement == "ACK\t$messageId") {
+                    "The receiving phone did not confirm delivery."
                 }
             }
         }
     }
 
-    private fun receive(socket: Socket) {
+    private suspend fun receive(socket: Socket) {
         socket.use { connection ->
             try {
                 val line = connection.getInputStream().bufferedReader(Charsets.UTF_8).readLine() ?: return
                 val parts = line.split('\t')
-                if (parts.size != 4 || parts[0] != PROTOCOL_PREFIX) return
-                val sender = String(Base64.decode(parts[1], Base64.DEFAULT), Charsets.UTF_8).take(60)
-                val message = String(Base64.decode(parts[2], Base64.DEFAULT), Charsets.UTF_8).take(4_000)
-                if (sender.isBlank() || message.isBlank()) return
+                if (parts.size != 6 || parts[0] != PROTOCOL_PREFIX) return
+                val senderDeviceId = parts[1].take(80)
+                val sender = String(Base64.decode(parts[2], Base64.DEFAULT), Charsets.UTF_8).take(60)
+                val message = String(Base64.decode(parts[3], Base64.DEFAULT), Charsets.UTF_8).take(4_000)
+                val messageId = parts[4].take(80)
+                if (senderDeviceId.isBlank() || sender.isBlank() || message.isBlank() || messageId.isBlank()) return
                 val host = connection.inetAddress.hostAddress ?: "unknown"
-                val peer = NearbyPeer(host, sender, host, connection.port)
-                main.post { onMessage(peer, message) }
-            } catch (_: Exception) {
-                postStatus("A message couldn't be received. Check that both phones are on the same network.")
+                val peer = NearbyPeer(senderDeviceId, sender, host, 0)
+                withContext(Dispatchers.Main) { onMessage(peer, message) }
+                val writer = connection.getOutputStream().bufferedWriter(Charsets.UTF_8)
+                writer.write("ACK\t$messageId")
+                writer.newLine()
+                writer.flush()
+            } catch (error: Exception) {
+                postStatus("A message couldn't be received: ${error.localizedMessage ?: "check the local connection"}")
             }
         }
     }
